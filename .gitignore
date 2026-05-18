@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+frontend/dist/
+.idea/
+.cursor/
+database.db
+uploads/*
+!uploads/.gitkeep
+.__deploy_chat.tgz
