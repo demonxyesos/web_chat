@@ -5,6 +5,8 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from asyncgram_common.config import DATABASE_URL
 
+USE_SCHEMAS = DATABASE_URL.startswith("postgresql")
+
 
 class Base(DeclarativeBase):
     pass

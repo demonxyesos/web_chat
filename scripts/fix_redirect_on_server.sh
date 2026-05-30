@@ -1,0 +1,91 @@
+#!/bin/bash
+# Убрать редирект HTTP->HTTPS на origin. HTTPS — только через Cloudflare.
+set -e
+cat > /etc/nginx/sites-available/asyncgram.conf << 'EOF'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name proxy-mamont.click www.proxy-mamont.click;
+    client_max_body_size 12m;
+    root /opt/chat/frontend/dist;
+    index index.html;
+
+    location /auth/ {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
+    location = /users/me {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
+    location /chats/ {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
+    location /messages {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
+    location = /users/search {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+
+    location /upload {
+        proxy_pass http://127.0.0.1:8004;
+        proxy_set_header Host $host;
+        client_max_body_size 12m;
+    }
+
+    location /uploads/ {
+        proxy_pass http://127.0.0.1:8004;
+    }
+
+    location /admin/ {
+        proxy_pass http://127.0.0.1:8005;
+        proxy_set_header Host $host;
+    }
+
+    location /ws/chat {
+        proxy_pass http://127.0.0.1:8003;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/asyncgram.conf /etc/nginx/sites-enabled/asyncgram.conf
+rm -f /etc/nginx/sites-enabled/chat /etc/nginx/sites-enabled/default
+nginx -t
+systemctl reload nginx
+echo "OK — проверка:"
+curl -sI http://127.0.0.1/ -H 'Host: proxy-mamont.click' | head -3

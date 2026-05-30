@@ -11,6 +11,8 @@ from .routes import router
 
 ensure_schemas()
 dialect = engine.dialect.name
+Base.metadata.create_all(bind=engine, tables=[Chat.__table__, Message.__table__])
+
 with engine.connect() as conn:
     migrate_is_global(conn, dialect)
     if dialect == "postgresql":
@@ -29,8 +31,6 @@ with engine.connect() as conn:
             )
         )
         conn.commit()
-
-Base.metadata.create_all(bind=engine, tables=[Chat.__table__, Message.__table__])
 
 db = SessionLocal()
 try:
