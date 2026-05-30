@@ -10,6 +10,7 @@ frontend/dist/
 .idea/
 .cursor/
 database.db
+test_smoke.db
 uploads/*
 !uploads/.gitkeep
 .__deploy_chat.tgz

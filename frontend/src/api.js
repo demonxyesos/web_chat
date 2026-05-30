@@ -41,6 +41,11 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+export async function createMessage(payload) {
+  const { data } = await api.post("/messages", payload);
+  return data;
+}
+
 export async function registerUser(username, name, password, passwordConfirm) {
   return api.post("/auth/register", {
     username,

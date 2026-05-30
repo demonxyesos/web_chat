@@ -3,6 +3,7 @@ import {
   API_BASE,
   LOBBY_PEER_USERNAME,
   createChatWebSocket,
+  createMessage,
   deleteChat,
   deleteMyAccount,
   deleteMyMessage,
@@ -639,7 +640,6 @@ export function Chat({ currentUser, onLogout }) {
     const text = input.trim();
     if (!activePeer) return;
     if (!text && !pendingFile) return;
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     const payload = {
       content: text,
       to: activePeer,
@@ -651,7 +651,18 @@ export function Chat({ currentUser, onLogout }) {
       payload.file_type = pendingFile.file_type;
       payload.file_size = pendingFile.file_size;
     }
-    wsRef.current.send(JSON.stringify(payload));
+    createMessage(payload)
+      .then((created) => {
+        setMessages((prev) => mergeMessagesById(prev, [created]));
+        if (typeof created.id === "number") {
+          lastMessageIdRef.current = Math.max(lastMessageIdRef.current, created.id);
+        }
+        scheduleFullChatsRefresh();
+      })
+      .catch((err) => {
+        console.error(err);
+        alert("Не удалось отправить сообщение");
+      });
     setInput("");
     setReplyTo(null);
     setPendingFile(null);

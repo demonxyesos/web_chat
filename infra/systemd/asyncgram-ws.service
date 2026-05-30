@@ -1,0 +1,18 @@
+[Unit]
+Description=Asyncgram WebSocket Gateway
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/chat
+EnvironmentFile=/opt/chat/.env
+Environment=PYTHONPATH=/opt/chat:/opt/chat/packages/common
+ExecStart=/opt/chat/venv/bin/uvicorn services.ws_gateway.app.main:app --host 127.0.0.1 --port 8003
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
