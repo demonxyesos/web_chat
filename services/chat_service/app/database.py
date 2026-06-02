@@ -1,6 +1,7 @@
 import os
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from asyncgram_common.config import DATABASE_URL
@@ -36,9 +37,12 @@ def ensure_schemas() -> None:
     if not USE_SCHEMAS:
         return
     with engine.connect() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS auth"))
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS chat"))
-        conn.commit()
+        for schema in ("auth", "chat"):
+            try:
+                conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+                conn.commit()
+            except IntegrityError:
+                conn.rollback()
 
 
 def get_db():

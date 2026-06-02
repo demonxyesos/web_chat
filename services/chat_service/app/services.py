@@ -14,11 +14,37 @@ def user_out(user) -> schemas.UserOut:
     return schemas.UserOut.model_validate(user)
 
 
+def resolve_user(users: UserRepository, user_id: int) -> schemas.UserOut:
+    user = users.get_active_by_id(user_id) or users.get_by_id(user_id)
+    if not user:
+        return schemas.UserOut(
+            id=user_id,
+            username="deleted",
+            name="Deleted",
+            role="user",
+            created_at=datetime(1970, 1, 1),
+        )
+    return user_out(user)
+
+
 def message_to_out(msg: models.Message, users: UserRepository) -> schemas.MessageOut:
-    author = users.get_active_by_id(msg.author_id)
-    recipient = users.get_active_by_id(msg.recipient_id)
+    author = users.get_active_by_id(msg.author_id) or users.get_by_id(msg.author_id)
+    recipient = users.get_active_by_id(msg.recipient_id) or users.get_by_id(msg.recipient_id)
     if not author or not recipient:
-        raise HTTPException(status_code=500, detail="Message user data missing")
+        return schemas.MessageOut(
+            id=msg.id,
+            content=msg.content,
+            created_at=msg.created_at,
+            edited_at=msg.edited_at,
+            chat_id=msg.chat_id,
+            reply_to=None,
+            author=resolve_user(users, msg.author_id),
+            recipient=resolve_user(users, msg.recipient_id),
+            file_url=msg.file_url,
+            file_name=msg.file_name,
+            file_type=msg.file_type,
+            file_size=msg.file_size,
+        )
     reply_ref = None
     if msg.reply_to_message_id:
         reply = msg.reply_to
@@ -48,6 +74,7 @@ def message_to_out(msg: models.Message, users: UserRepository) -> schemas.Messag
 
 def ws_payload(msg: models.Message, author, recipient, reply_payload=None) -> dict:
     return {
+        "type": "message.created",
         "id": msg.id,
         "chat_id": msg.chat_id,
         "content": msg.content,

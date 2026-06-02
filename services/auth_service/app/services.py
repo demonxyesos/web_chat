@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from asyncgram_common.constants import LOBBY_USERNAME
 from asyncgram_common.jwt import create_access_token
-from asyncgram_common.passwords import get_password_hash, verify_password
+from asyncgram_common.passwords import get_password_hash, is_bcrypt_hash, verify_password
 
 from . import models, schemas
 from .repositories import UserRepository
@@ -24,7 +24,7 @@ class AuthService:
         if self.users.get_active_by_name(user_in.name):
             raise HTTPException(status_code=400, detail="Name already taken")
 
-        is_first_user = self.users.count_all() == 0
+        is_first_user = self.users.count_real_users() == 0
         user = models.User(
             username=user_in.username,
             name=user_in.name,
@@ -43,6 +43,10 @@ class AuthService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect username or password",
             )
+        if not is_bcrypt_hash(user.password_hash):
+            user.password_hash = get_password_hash(password)
+            self.db.add(user)
+            self.db.commit()
         access_token = create_access_token(subject=user.id, role=user.role)
         user_out = schemas.UserOut.model_validate(user)
         return schemas.Token(access_token=access_token, user=user_out)

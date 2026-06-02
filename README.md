@@ -514,9 +514,241 @@ sequenceDiagram
 
 **Fallback:** если WebSocket отключён, `Chat.jsx` подтягивает историю по HTTP каждые 3 секунды.
 
+### 8.1. Подробно: как личное сообщение доходит до другого пользователя
+
+Ниже — полный путь **от нажатия [SEND] у отправителя до появления строки в ленте у получателя**.  
+Отправка идёт через **HTTP**; WebSocket используется только для **доставки** (push).
+
+#### Схема (личный диалог 1:1)
+
+```mermaid
+sequenceDiagram
+  participant A as Отправитель (Chat.jsx)
+  participant API as api.js / axios
+  participant GW as nginx
+  participant CS as chat-service
+  participant DB as PostgreSQL
+  participant R as Redis
+  participant WS as ws-gateway
+  participant B as Получатель (Chat.jsx)
+
+  A->>A: sendMessage()
+  A->>API: createMessage(payload)
+  API->>GW: POST /messages + Bearer JWT
+  GW->>CS: create_message route
+  CS->>CS: ChatService.create_message()
+  CS->>DB: INSERT messages
+  CS->>CS: build_created_event()
+  CS->>R: EventBus.publish()
+  CS-->>API: MessageOut (201)
+  API-->>A: mergeMessagesById — лента отправителя
+
+  R->>WS: subscribe chat.events
+  WS->>WS: dispatch_event()
+  WS->>A: send_json (если WS открыт)
+  WS->>B: send_json
+  B->>B: ws.onmessage → mergeMessagesById
+```
+
 ---
 
-## 9. Frontend
+#### Шаг 1. Отправитель: форма и HTTP-запрос
+
+| # | Где | Функция | Что делает |
+|---|---|---|---|
+| 1 | `frontend/src/Chat.jsx` | `sendMessage(e)` | `preventDefault()`, проверяет `activePeer`, текст/файл. Собирает `{ content, to, reply_to_id, file_* }`. |
+| 2 | `frontend/src/api.js` | `createMessage(payload)` | `api.post("/messages", payload)` — axios с `baseURL: API_BASE`. |
+| 3 | `frontend/src/api.js` | interceptor (request) | Читает JWT из `localStorage` (`getStoredToken()`), добавляет заголовок `Authorization: Bearer …`. |
+| 4 | `infra/nginx/asyncgram.conf` | proxy | Проксирует `POST /messages` → **chat-service :8002**. |
+| 5 | `Chat.jsx` (ответ) | `.then((created) => …)` | Сразу добавляет сообщение в свою ленту: `mergeMessagesById`, обновляет `lastMessageIdRef`, поднимает чат в списке через `upsertChatListFromIncomingMessage`, планирует `scheduleFullChatsRefresh()`. |
+
+**Внутри `sendMessage` (отправитель):**
+
+```javascript
+// Chat.jsx — упрощённо
+function sendMessage(e) {
+  e.preventDefault();
+  const payload = { content: text, to: activePeer, reply_to_id: replyTo?.id ?? null, ...fileFields };
+  createMessage(payload)
+    .then((created) => {
+      setMessages((prev) => mergeMessagesById(prev, [created]));
+      setServerChats((prev) => upsertChatListFromIncomingMessage(prev, created, currentUserRef.current));
+    });
+  setInput(""); setReplyTo(null); setPendingFile(null);
+}
+```
+
+**Внутри `createMessage`:**
+
+```javascript
+// api.js
+export async function createMessage(payload) {
+  const { data } = await api.post("/messages", payload);
+  return data;  // MessageOut с id, chat_id, author, recipient, ...
+}
+```
+
+> Если прикреплён файл: до `sendMessage` вызывается `uploadFile()` → `POST /upload` (media-service), в payload попадают `file_url`, `file_name`, …
+
+---
+
+#### Шаг 2. chat-service: авторизация, бизнес-логика, БД
+
+| # | Где | Функция | Что делает |
+|---|---|---|---|
+| 6 | `packages/common/asyncgram_common/auth_deps.py` | `get_token_user()` | Dependency FastAPI: из заголовка `Authorization` достаёт JWT, `decode_token_payload()` → `TokenUser(user_id, role)`. |
+| 7 | `services/chat_service/app/routes.py` | `create_message()` | HTTP-обработчик `POST /messages`. |
+| 8 | `routes.py` | `get_chat_service()` | Создаёт `ChatService(UserRepository, ChatRepository, MessageRepository, db)`. |
+| 9 | `services/chat_service/app/services.py` | `ChatService.create_message(author_id, msg_in)` | Основная логика создания сообщения. |
+| 10 | `services.py` | `build_created_event(...)` | Формирует `ChatEvent` для Redis. |
+| 11 | `packages/common/asyncgram_common/redis_bus.py` | `EventBus.publish(event)` | `redis.publish("chat.events", event.model_dump_json())`. |
+| 12 | `routes.py` | `message_to_out(msg, users)` | Сериализует ORM → `MessageOut` в HTTP-ответ. |
+
+**Внутри `create_message` (route):**
+
+```python
+msg, chat, author, recipient, reply_to = service.create_message(current.id, msg_in)
+event = service.build_created_event(msg, chat, author, recipient, reply_to)
+await event_bus.publish(event)
+return message_to_out(msg, UserRepository(db))
+```
+
+**Внутри `ChatService.create_message` (личный чат, не lobby):**
+
+1. `msg_in.to == LOBBY_USERNAME` → иначе ветка `_create_global_message` (см. §8.2).
+2. `users.get_active_by_username(msg_in.to)` — найти получателя; иначе `404`.
+3. `chats.get_pair_chat(author_id, recipient.id)` — найти диалог; если нет → `create_pair_chat`.
+4. Если чат был удалён (`is_deleted`) — восстановить и пометить старые сообщения удалёнными.
+5. При `reply_to_id` — `messages.get_in_chat(reply_to_id, chat.id)`.
+6. `messages.create(...)` — INSERT в `chat.messages`, `commit`.
+7. Обновить `chat.updated_at`, снова `commit`.
+8. Вернуть `(msg, chat, author, recipient, reply_to)`.
+
+**Внутри `MessageRepository.create`:**
+
+```python
+msg = models.Message(content=..., chat_id=..., author_id=..., recipient_id=..., ...)
+self.db.add(msg)
+self.db.commit()
+self.db.refresh(msg)
+return msg
+```
+
+**Внутри `build_created_event` (личный диалог):**
+
+```python
+payload = ws_payload(msg, author, recipient, reply_payload(...))
+return ChatEvent(
+    type="message.created",
+    broadcast=False,
+    target_user_ids=[author.id, recipient.id],  # только эти два user_id
+    payload=payload,
+)
+```
+
+`ws_payload` собирает JSON с `id`, `chat_id`, `content`, `author`, `recipient`, `file_*`, `reply_to`.
+
+---
+
+#### Шаг 3. Redis → ws-gateway → WebSocket клиентам
+
+| # | Где | Функция | Что делает |
+|---|---|---|---|
+| 13 | `redis_bus.py` | `EventBus.subscribe(handler)` | Фоновая задача ws-gateway слушает канал `chat.events`. |
+| 14 | `services/ws_gateway/app/main.py` | `_redis_listener()` | `await event_bus.subscribe(dispatch_event)`. |
+| 15 | `services/ws_gateway/app/connections.py` | `dispatch_event(event)` | Если `broadcast=False` — цикл по `target_user_ids`. |
+| 16 | `connections.py` | `manager.send_to(user_id, payload)` | Ищет `active_connections[user_id]` и вызывает `websocket.send_json(payload)`. |
+| 17 | `ws_gateway/app/main.py` | `websocket_endpoint()` | При подключении: JWT из `?token=`, `manager.connect(user_id, ws)`. Соединение держится открытым (клиент **не шлёт** сообщения по WS). |
+
+**Внутри `dispatch_event`:**
+
+```python
+async def dispatch_event(event: ChatEvent) -> None:
+    payload = event.payload
+    if event.broadcast:
+        await manager.broadcast_json(payload)
+        return
+    for user_id in event.target_user_ids:
+        await manager.send_to(user_id, payload)
+```
+
+Для личного чата ws-gateway шлёт **два** push: отправителю и получателю (если оба online). Offline-клиент увидит сообщение при следующем `GET /chats/{user}/messages` или при fallback-polling.
+
+---
+
+#### Шаг 4. Получатель: приём по WebSocket и UI
+
+| # | Где | Функция | Что делает |
+|---|---|---|---|
+| 18 | `frontend/src/api.js` | `createChatWebSocket()` | `new WebSocket("ws://…/ws/chat?token=" + JWT)`. |
+| 19 | `Chat.jsx` | `useEffect` → `connect()` | При монтировании открывает WS, вешает `ws.onmessage`. |
+| 20 | `Chat.jsx` | `ws.onmessage` | `JSON.parse(event.data)` — приходит **payload** сообщения (без обёртки `ChatEvent`; ws-gateway отдаёт только `event.payload`). |
+| 21 | `Chat.jsx` | `upsertChatListFromIncomingMessage()` | Поднимает чат в сайдбаре, обновляет `last_message`. |
+| 22 | `Chat.jsx` | `wsMessageTargetsOpenThread()` | Решает, добавлять ли в открытую ленту. |
+| 23 | `Chat.jsx` | `mergeMessagesById()` | Дедуп по `id`, сортировка, `setMessages`. |
+
+**Внутри `wsMessageTargetsOpenThread` (получатель с открытым диалогом):**
+
+```javascript
+// true, если msg.chat_id совпадает с открытым чатом
+// или пара author/recipient — это я и activePeer
+return (a === me && r === activePeer) || (a === activePeer && r === me);
+```
+
+**Если диалог не открыт:** сообщение **не** попадает в `messages`, но увеличивается счётчик `unreadByPeer[other]` и обновляется список чатов.
+
+**Обработка в `ws.onmessage` (новое сообщение):**
+
+```javascript
+const other = a === me ? r : a;
+setServerChats((prev) => upsertChatListFromIncomingMessage(prev, msg, currentUserRef.current));
+
+if (other !== activePeerRef.current) {
+  setUnreadByPeer((prev) => ({ ...prev, [other]: (prev[other] || 0) + 1 }));
+}
+
+if (wsMessageTargetsOpenThread(msg, openChatId, activePeerRef.current, LOBBY_PEER_USERNAME, me)) {
+  setMessages((prev) => mergeMessagesById(prev, [msg]));
+}
+```
+
+---
+
+#### Шаг 5. Fallback (если WS недоступен)
+
+| # | Где | Функция | Что делает |
+|---|---|---|---|
+| 24 | `Chat.jsx` | `useEffect` + `setInterval(3000)` | Если WS закрыт или раз в 10 тиков — `fetchChatMessages(activePeer)` → `GET /chats/{username}/messages`. |
+| 25 | `chat-service` | `list_chat_messages()` | `ChatService.list_chat_messages()` → `messages.list_active_in_chat()` → массив `MessageOut`. |
+
+---
+
+#### 8.2. Отличие: общий чат (`__lobby__`)
+
+Тот же HTTP `POST /messages`, но:
+
+- `ChatService._create_global_message()` — `recipient_id = lobby.id`, чат с `is_global=1`.
+- `build_created_event()` → `ChatEvent(broadcast=True)` — **без** `target_user_ids`.
+- `dispatch_event()` → `manager.broadcast_json()` — push **всем** подключённым клиентам.
+
+---
+
+#### 8.3. Сводная таблица функций
+
+| Этап | Файл | Ключевые функции |
+|---|---|---|
+| UI отправки | `Chat.jsx` | `sendMessage`, `mergeMessagesById`, `upsertChatListFromIncomingMessage` |
+| HTTP клиент | `api.js` | `createMessage`, axios interceptor |
+| API | `chat_service/.../routes.py` | `create_message`, `get_chat_service` |
+| Бизнес-логика | `chat_service/.../services.py` | `ChatService.create_message`, `build_created_event`, `ws_payload` |
+| БД | `chat_service/.../repositories.py` | `MessageRepository.create`, `ChatRepository.get_pair_chat` |
+| Шина | `asyncgram_common/redis_bus.py` | `EventBus.publish`, `EventBus.subscribe` |
+| WS | `ws_gateway/.../main.py` | `websocket_endpoint`, `_redis_listener` |
+| WS доставка | `ws_gateway/.../connections.py` | `dispatch_event`, `manager.send_to` |
+| UI приёма | `Chat.jsx` | `createChatWebSocket`, `ws.onmessage`, `wsMessageTargetsOpenThread` |
+
+---
+
 
 ### 9.1. Структура
 

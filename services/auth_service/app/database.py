@@ -1,6 +1,7 @@
 import os
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from asyncgram_common.config import DATABASE_URL
@@ -29,8 +30,11 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def ensure_schema() -> None:
     if engine.dialect.name == "postgresql":
         with engine.connect() as conn:
-            conn.execute(text("CREATE SCHEMA IF NOT EXISTS auth"))
-            conn.commit()
+            try:
+                conn.execute(text("CREATE SCHEMA IF NOT EXISTS auth"))
+                conn.commit()
+            except IntegrityError:
+                conn.rollback()
 
 
 def get_db():

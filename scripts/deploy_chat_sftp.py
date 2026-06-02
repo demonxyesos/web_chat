@@ -47,6 +47,8 @@ def collect_files() -> list[tuple[Path, Path]]:
         for name in filenames:
             if name == ".__deploy_chat.tgz":
                 continue
+            if name == ".env":
+                continue
             p = dp / name
             rel = p.relative_to(REPO_ROOT)
             if path_has_skipped_part(rel):

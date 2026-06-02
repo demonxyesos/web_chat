@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { loginUser, registerUser } from "./api";
+import { clearChatsCacheForUser, loginUser, registerUser } from "./api";
 
 export function AuthForm({ onAuthenticated }) {
   const [mode, setMode] = useState("login");
@@ -19,6 +19,7 @@ export function AuthForm({ onAuthenticated }) {
         await registerUser(username.trim(), name.trim(), password, passwordConfirm);
       }
       const tokenResponse = await loginUser(username.trim(), password);
+      clearChatsCacheForUser(tokenResponse.user?.id);
       onAuthenticated(tokenResponse.user);
     } catch (err) {
       console.error(err);

@@ -56,6 +56,9 @@ class UserRepository:
             .first()
         )
 
+    def get_by_id(self, user_id: int):
+        return self.db.query(models.User).filter(models.User.id == user_id).first()
+
     def search_active(self, query: str, exclude_user_id: int):
         return (
             self.db.query(models.User)

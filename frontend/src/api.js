@@ -26,6 +26,16 @@ export function setStoredToken(token) {
   }
 }
 
+export function clearChatsCacheForUser(userId) {
+  if (userId == null) return;
+  try {
+    window.localStorage.removeItem(`chats_cache_user_${userId}`);
+    window.localStorage.removeItem(`recent_chats_user_${userId}`);
+  } catch {
+    // ignore
+  }
+}
+
 const api = axios.create({
   baseURL: API_BASE,
   headers: {
@@ -40,6 +50,17 @@ api.interceptors.request.use((config) => {
   }
   return config;
 });
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const url = String(error?.config?.url || "");
+    if (error?.response?.status === 401 && (url.includes("/users/me") || url.includes("/auth/"))) {
+      setStoredToken("");
+    }
+    return Promise.reject(error);
+  }
+);
 
 export async function createMessage(payload) {
   const { data } = await api.post("/messages", payload);

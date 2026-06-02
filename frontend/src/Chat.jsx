@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
   LOBBY_PEER_USERNAME,
+  clearChatsCacheForUser,
   createChatWebSocket,
   createMessage,
   deleteChat,
@@ -23,6 +24,21 @@ function storageKeyForUser(userId) {
 
 function chatsCacheKeyForUser(userId) {
   return `chats_cache_user_${userId}`;
+}
+
+function unreadCacheKeyForUser(userId) {
+  return `unread_by_peer_user_${userId}`;
+}
+
+function loadUnreadByPeer(userId) {
+  try {
+    const raw = window.localStorage.getItem(unreadCacheKeyForUser(userId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function mergeMessagesById(prev, incoming) {
@@ -160,7 +176,7 @@ export function Chat({ currentUser, onLogout }) {
   const [activePeer, setActivePeer] = useState("");
   const [serverChats, setServerChats] = useState([]);
   const serverChatsRef = useRef(serverChats);
-  const [unreadByPeer, setUnreadByPeer] = useState({});
+  const [unreadByPeer, setUnreadByPeer] = useState(() => loadUnreadByPeer(currentUser.id));
   const [status, setStatus] = useState("Подключение...");
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
@@ -258,6 +274,16 @@ export function Chat({ currentUser, onLogout }) {
   }, [serverChats, activePeer, currentUser]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        unreadCacheKeyForUser(currentUser.id),
+        JSON.stringify(unreadByPeer)
+      );
+    } catch {
+    }
+  }, [unreadByPeer, currentUser.id]);
+
+  useEffect(() => {
     const mq = window.matchMedia("(max-width: 768px)");
     const sync = () => {
       const narrow = mq.matches;
@@ -291,6 +317,18 @@ export function Chat({ currentUser, onLogout }) {
     setActivePeer(username);
     setConfirmDeletePeer(null);
     setDeleteCountdown(0);
+    setUnreadByPeer((prev) => {
+      if (!prev[username]) return prev;
+      const next = { ...prev };
+      delete next[username];
+      return next;
+    });
+    fetchChats()
+      .then((chats) => {
+        setServerChats(chats);
+        persistChatsCache(chats);
+      })
+      .catch((e) => console.error("selectPeer refresh failed", e));
     if (window.matchMedia("(max-width: 768px)").matches) setSidebarDrawerOpen(false);
   }
 
@@ -302,36 +340,36 @@ export function Chat({ currentUser, onLogout }) {
   }
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(chatsCacheKeyForUser(currentUser.id));
-      if (!raw) return;
-      const cached = JSON.parse(raw);
-      if (Array.isArray(cached)) {
-        setServerChats(cached);
-      }
-    } catch {
-    }
-  }, [currentUser.id]);
-
-  useEffect(() => {
     let cancelled = false;
-    async function loadChats() {
+
+    async function loadChats(retry = 0) {
       try {
         const chats = await fetchChats();
         if (cancelled) return;
         setServerChats(chats);
-        try {
-          window.localStorage.setItem(chatsCacheKeyForUser(currentUser.id), JSON.stringify(chats));
-        } catch {
-        }
+        persistChatsCache(chats);
       } catch (e) {
-        console.error(e);
-        if (!cancelled) setServerChats([]);
+        console.error("loadChats failed", e);
+        if (cancelled) return;
+        if (e?.response?.status === 401) {
+          onLogout();
+          return;
+        }
+        if (retry < 3) {
+          window.setTimeout(() => loadChats(retry + 1), 800 * (retry + 1));
+        }
       }
     }
+
+    clearChatsCacheForUser(currentUser.id);
     loadChats();
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadChats();
+    }, 15000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(poll);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser.id]);
@@ -436,6 +474,7 @@ export function Chat({ currentUser, onLogout }) {
               scheduleFullChatsRefresh();
               return;
             }
+            if (msg.type && msg.type !== "message.created") return;
 
             const a = msg.author?.username;
             const r = msg.recipient?.username;
@@ -451,13 +490,13 @@ export function Chat({ currentUser, onLogout }) {
                 msg.chat_id != null &&
                 (r === LOBBY_PEER_USERNAME || a === LOBBY_PEER_USERNAME);
               if (isGlobalMsg) {
-                if (activePeerRef.current !== LOBBY_PEER_USERNAME) {
+                if (activePeerRef.current !== LOBBY_PEER_USERNAME && a !== me) {
                   setUnreadByPeer((prev) => ({
                     ...prev,
                     [LOBBY_PEER_USERNAME]: (prev[LOBBY_PEER_USERNAME] || 0) + 1
                   }));
                 }
-              } else if (other !== activePeerRef.current) {
+              } else if (other !== activePeerRef.current && a !== me) {
                 setUnreadByPeer((prev) => ({
                   ...prev,
                   [other]: (prev[other] || 0) + 1
@@ -483,6 +522,12 @@ export function Chat({ currentUser, onLogout }) {
 
         ws.onopen = () => {
           setStatus("Подключено");
+          fetchChats()
+            .then((chats) => {
+              setServerChats(chats);
+              persistChatsCache(chats);
+            })
+            .catch(() => {});
         };
 
         ws.onclose = () => {
@@ -657,6 +702,9 @@ export function Chat({ currentUser, onLogout }) {
         if (typeof created.id === "number") {
           lastMessageIdRef.current = Math.max(lastMessageIdRef.current, created.id);
         }
+        setServerChats((prev) =>
+          upsertChatListFromIncomingMessage(prev, created, currentUserRef.current)
+        );
         scheduleFullChatsRefresh();
       })
       .catch((err) => {

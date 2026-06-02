@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
 
+from asyncgram_common.constants import LOBBY_USERNAME
+
 from . import models
 
 
@@ -9,6 +11,13 @@ class UserRepository:
 
     def count_all(self) -> int:
         return self.db.query(models.User).count()
+
+    def count_real_users(self) -> int:
+        return (
+            self.db.query(models.User)
+            .filter(models.User.username != LOBBY_USERNAME, models.User.is_deleted == 0)
+            .count()
+        )
 
     def get_active_by_username(self, username: str):
         return (

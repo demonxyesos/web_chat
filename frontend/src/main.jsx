@@ -29,6 +29,24 @@ function App() {
     checkAuth();
   }, []);
 
+  useEffect(() => {
+    async function refreshMe() {
+      if (!getStoredToken()) return;
+      try {
+        const me = await fetchMe();
+        setCurrentUser(me);
+      } catch {
+        setStoredToken("");
+        setCurrentUser(null);
+      }
+    }
+    function onVisible() {
+      if (document.visibilityState === "visible") refreshMe();
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
+
   return (
     <>
       <BinaryRainBackground />
